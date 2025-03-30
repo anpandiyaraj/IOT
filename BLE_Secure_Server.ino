@@ -18,7 +18,8 @@ BLE2902 *pBLE2902_2;
 // Connection state
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
-uint32_t value = 0;
+bool isAuthenticated = false;
+uint16_t currentConnId = 0;
 
 // UUIDs
 #define SERVICE_UUID          "a1c658ed-1df2-4c5c-8477-708f714f01f7"
@@ -44,8 +45,13 @@ void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
       if(param->ble_security.auth_cmpl.success) {
         Serial.println("Authentication successful");
+        isAuthenticated = true;
       } else {
-        Serial.println("Authentication failed");
+        Serial.println("Authentication failed - disconnecting");
+        isAuthenticated = false;
+        if(pServer != nullptr && currentConnId > 0) {
+          pServer->disconnect(currentConnId);
+        }
       }
       break;
   }
@@ -54,21 +60,37 @@ void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       deviceConnected = true;
-      Serial.println("Client connected.");
+      currentConnId = pServer->getConnId();
+      isAuthenticated = false;
+      Serial.println("Client connected - waiting for authentication");
     };
 
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
+      currentConnId = 0;
+      isAuthenticated = false;
       Serial.println("Device disconnected");
     }
 };
 
 class CharacteristicCallBack: public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pChar) override {
+    if (!isAuthenticated) {
+      Serial.println("Unauthorized access attempt - ignoring write");
+      return;
+    }
     String pChar2_value_string = pChar->getValue().c_str();
     Serial.println(pChar2_value_string);
     pCharacteristic_1->setValue(pChar2_value_string + "ed");
     pCharacteristic_1->notify();
+  }
+
+  void onRead(BLECharacteristic *pChar) override {
+    if (!isAuthenticated) {
+      Serial.println("Unauthorized access attempt - blocking read");
+      pChar->setValue("");
+      return;
+    }
   }
 };
 
@@ -84,19 +106,32 @@ class MySecurityCallbacks : public BLESecurityCallbacks {
 
   bool onConfirmPIN(uint32_t pass_key) override {
     Serial.printf("Confirming passkey: %d\n", pass_key);
-    return true;
+    bool match = (pass_key == atoi(PASSKEY));
+    if (!match) {
+      Serial.println("Passkey mismatch - rejecting");
+      isAuthenticated = false;
+      if(pServer != nullptr && currentConnId > 0) {
+        pServer->disconnect(currentConnId);
+      }
+    }
+    return match;
   }
 
   void onAuthenticationComplete(esp_ble_auth_cmpl_t auth_cmpl) override {
     if (auth_cmpl.success) {
       Serial.println("Authentication successful");
+      isAuthenticated = true;
     } else {
-      Serial.println("Authentication failed");
+      Serial.println("Authentication failed - disconnecting");
+      isAuthenticated = false;
+      if(pServer != nullptr && currentConnId > 0) {
+        pServer->disconnect(currentConnId);
+      }
     }
   }
 
   bool onSecurityRequest() override {
-    Serial.println("Security request received");
+    Serial.println("Security request received - requiring authentication");
     return true;
   }
 };
@@ -117,13 +152,18 @@ void setup() {
   // Set up BLE security
   BLESecurity *pSecurity = new BLESecurity();
   pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
-  pSecurity->setCapability(ESP_IO_CAP_OUT); // Changed from ESP_IO_CAP_DISPLAY_ONLY
+  pSecurity->setCapability(ESP_IO_CAP_OUT);
   pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   pSecurity->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  pSecurity->setKeySize(16);
 
   // Set static passkey
   uint32_t passkey = atoi(PASSKEY);
   esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &passkey, sizeof(uint32_t));
+
+  // Enable security request on connection
+  uint8_t auth_option = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_ENABLE;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &auth_option, sizeof(uint8_t));
 
   // Create the BLE Server
   pServer = BLEDevice::createServer();
@@ -162,6 +202,7 @@ void setup() {
   pCharacteristic_2->addDescriptor(pBLE2902_2);
 
   // Set callbacks
+  pCharacteristic_1->setCallbacks(new CharacteristicCallBack());
   pCharacteristic_2->setCallbacks(new CharacteristicCallBack());
   
   // Start service
@@ -184,14 +225,12 @@ void setup() {
 }
 
 void loop() {
-    // Handle disconnection
     if (!deviceConnected && oldDeviceConnected) {
         delay(500);
         pServer->startAdvertising();
         Serial.println("Start advertising");
         oldDeviceConnected = deviceConnected;
     }
-    // Handle connection
     if (deviceConnected && !oldDeviceConnected) {
         oldDeviceConnected = deviceConnected;
     }
