@@ -21,6 +21,21 @@ bool oldDeviceConnected = false;
 bool isAuthenticated = false;
 uint16_t currentConnId = 0;
 
+enum class Command {
+    LOCK,
+    UNLOCK,
+    TRUNK,
+    LOCATE,
+    UNKNOWN
+};
+
+const std::map<String, String> COMMAND_RESPONSES = {
+    {"LOCK", "Door Locked"},
+    {"UNLOCK", "Door Unlocked"},
+    {"LOCATE", "Located"},
+    {"TRUNK", "Trunk Released"}
+};
+
 // UUIDs
 #define SERVICE_UUID          "a1c658ed-1df2-4c5c-8477-708f714f01f7"
 #define CHARACTERISTIC_UUID_1 "7dc6ca3d-f066-4bda-a742-4deb534b58d5"
@@ -29,32 +44,37 @@ uint16_t currentConnId = 0;
 // Predefined passkey
 #define PASSKEY "123456"
 
+#define LOCK_PIN    25  // GPIO pin for Lock
+#define UNLOCK_PIN  26  // GPIO pin for Unlock
+#define TRUNK_PIN   27  // GPIO pin for Trunk
+#define LOCATE_PIN  14  // GPIO pin for Locate/Siren
+
 // GAP callback to handle connection events
 void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
-  switch(event) {
-    case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
-      char macStr[18];
-      sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
-              param->update_conn_params.bda[0], param->update_conn_params.bda[1],
-              param->update_conn_params.bda[2], param->update_conn_params.bda[3],
-              param->update_conn_params.bda[4], param->update_conn_params.bda[5]);
-      Serial.print("Device connected: ");
-      Serial.println(macStr);
-      break;
-    
-    case ESP_GAP_BLE_AUTH_CMPL_EVT:
-      if(param->ble_security.auth_cmpl.success) {
-        Serial.println("Authentication successful");
-        isAuthenticated = true;
-      } else {
-        Serial.println("Authentication failed - disconnecting");
-        isAuthenticated = false;
-        if(pServer != nullptr && currentConnId > 0) {
-          pServer->disconnect(currentConnId);
-        }
-      }
-      break;
-  }
+    switch(event) {
+        case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
+            char macStr[18];
+            sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                    param->update_conn_params.bda[0], param->update_conn_params.bda[1],
+                    param->update_conn_params.bda[2], param->update_conn_params.bda[3],
+                    param->update_conn_params.bda[4], param->update_conn_params.bda[5]);
+            Serial.print("Device connected: ");
+            Serial.println(macStr);
+            break;
+        
+        case ESP_GAP_BLE_AUTH_CMPL_EVT:
+            if(param->ble_security.auth_cmpl.success) {
+                Serial.println("Authentication successful");
+                isAuthenticated = true;
+            } else {
+                Serial.println("Authentication failed - disconnecting");
+                isAuthenticated = false;
+                if(pServer != nullptr && currentConnId > 0) {
+                    pServer->disconnect(currentConnId);
+                }
+            }
+            break;
+    }
 }
 
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -74,24 +94,89 @@ class MyServerCallbacks: public BLEServerCallbacks {
 };
 
 class CharacteristicCallBack: public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pChar) override {
-    if (!isAuthenticated) {
-      Serial.println("Unauthorized access attempt - ignoring write");
-      return;
+private:
+    void controlPin(uint8_t pin, float seconds) {
+        digitalWrite(pin, HIGH);
+        delay(seconds * 1000);  // Convert seconds to milliseconds
+        digitalWrite(pin, LOW);
     }
-    String pChar2_value_string = pChar->getValue().c_str();
-    Serial.println(pChar2_value_string);
-    pCharacteristic_1->setValue(pChar2_value_string + "ed");
-    pCharacteristic_1->notify();
-  }
 
-  void onRead(BLECharacteristic *pChar) override {
-    if (!isAuthenticated) {
-      Serial.println("Unauthorized access attempt - blocking read");
-      pChar->setValue("");
-      return;
+    void blinkPin(uint8_t pin, float seconds) {
+        unsigned long endTime = millis() + (seconds * 1000);
+        while (millis() < endTime) {
+            digitalWrite(pin, HIGH);
+            delay(100);
+            digitalWrite(pin, LOW);
+            delay(100);
+        }
     }
-  }
+
+public:
+    Command parseCommand(const String& command) {
+        String cmd = command;
+        cmd.toUpperCase();
+        
+        if (cmd == "LOCK") return Command::LOCK;
+        if (cmd == "UNLOCK") return Command::UNLOCK;
+        if (cmd == "TRUNK") return Command::TRUNK;
+        if (cmd == "LOCATE") return Command::LOCATE;
+        return Command::UNKNOWN;
+    }
+
+    void onWrite(BLECharacteristic *pChar) override {
+        if (!isAuthenticated) {
+            Serial.println("Unauthorized access attempt - ignoring write");
+            return;
+        }
+
+        String receivedValue = pChar->getValue().c_str();
+        Serial.println("Received command: " + receivedValue);
+
+        Command cmd = parseCommand(receivedValue);
+        String response;
+
+        // Look up response in map
+        auto it = COMMAND_RESPONSES.find(receivedValue);
+        if (it != COMMAND_RESPONSES.end()) {
+            response = it->second;
+            Serial.println("Executing command: " + receivedValue);
+            
+            // Here you can add actual hardware control logic based on the command
+             switch(cmd) {
+                case Command::LOCK:
+                    controlPin(LOCK_PIN, 0.5);  // Activate for 0.5 seconds
+                    break;
+                case Command::UNLOCK:
+                    controlPin(UNLOCK_PIN, 0.5);  // Activate for 0.5 seconds
+                    break;
+                case Command::TRUNK:
+                    controlPin(TRUNK_PIN, 1.0);  // Activate for 1 second
+                    break;
+                case Command::LOCATE:
+                    pCharacteristic_1->setValue("Locating..");
+                    pCharacteristic_1->notify();
+                    blinkPin(LOCATE_PIN, 3.0);  // Blink for 3 seconds
+                    break;
+                default:
+                    break;
+            }
+        } else {
+            response = "INVALID_COMMAND";
+            Serial.println("Unknown command received");
+        }
+
+        pCharacteristic_1->setValue(response.c_str());
+        pCharacteristic_1->notify();
+        Serial.println("Response sent: " + response);
+    }
+
+    void onRead(BLECharacteristic *pChar) override {
+        if (!isAuthenticated) {
+            Serial.println("Unauthorized access attempt - blocking read");
+            pChar->setValue("");
+            return;
+        }
+    }
 };
 
 class MySecurityCallbacks : public BLESecurityCallbacks {
@@ -138,6 +223,20 @@ class MySecurityCallbacks : public BLESecurityCallbacks {
 
 void setup() {
   Serial.begin(115200);
+
+  pinMode(LOCK_PIN, OUTPUT);
+  pinMode(UNLOCK_PIN, OUTPUT);
+  pinMode(TRUNK_PIN, OUTPUT);
+  pinMode(LOCATE_PIN, OUTPUT);
+
+  // Initialize all pins to LOW
+  digitalWrite(LOCK_PIN, LOW);
+  digitalWrite(UNLOCK_PIN, LOW);
+  digitalWrite(TRUNK_PIN, LOW);
+  digitalWrite(LOCATE_PIN, LOW);
+
+  // Debug print
+  Serial.println("GPIO pins initialized");
 
   // Register the GAP callback
   esp_ble_gap_register_callback(gapCallback);
