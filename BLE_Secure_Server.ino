@@ -224,6 +224,20 @@ class MySecurityCallbacks : public BLESecurityCallbacks {
 void setup() {
   Serial.begin(115200);
 
+  pinMode(LOCK_PIN, OUTPUT);
+  pinMode(UNLOCK_PIN, OUTPUT);
+  pinMode(TRUNK_PIN, OUTPUT);
+  pinMode(LOCATE_PIN, OUTPUT);
+
+  // Initialize all pins to LOW
+  digitalWrite(LOCK_PIN, LOW);
+  digitalWrite(UNLOCK_PIN, LOW);
+  digitalWrite(TRUNK_PIN, LOW);
+  digitalWrite(LOCATE_PIN, LOW);
+
+  // Debug print
+  Serial.println("GPIO pins initialized");
+
   // Register the GAP callback
   esp_ble_gap_register_callback(gapCallback);
 
