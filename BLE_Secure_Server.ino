@@ -6,6 +6,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_bt_device.h"
 #include "esp_bt_main.h"
+#include "esp_sleep.h"
 
 // Initialize all pointers
 BLEServer* pServer = NULL;
@@ -20,6 +21,7 @@ bool deviceConnected = false;
 bool oldDeviceConnected = false;
 bool isAuthenticated = false;
 uint16_t currentConnId = 0;
+unsigned long lastDisconnectTime = 0;
 
 enum class Command {
     LOCK,
@@ -64,7 +66,7 @@ void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
             Serial.print("Device connected: ");
             Serial.println(macStr);
             break;
-        
+
         case ESP_GAP_BLE_AUTH_CMPL_EVT:
             if(param->ble_security.auth_cmpl.success) {
                 Serial.println("Authentication successful");
@@ -92,6 +94,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
       deviceConnected = false;
       currentConnId = 0;
       isAuthenticated = false;
+      lastDisconnectTime = millis();
       Serial.println("Device disconnected");
     }
 };
@@ -118,7 +121,7 @@ public:
     Command parseCommand(const String& command) {
         String cmd = command;
         cmd.toUpperCase();
-        
+
         if (cmd == "LOCK") return Command::LOCK;
         if (cmd == "UNLOCK") return Command::UNLOCK;
         if (cmd == "TRUNK") return Command::TRUNK;
@@ -144,7 +147,7 @@ public:
         if (it != COMMAND_RESPONSES.end()) {
             response = it->second;
             Serial.println("Executing command: " + receivedValue);
-            
+
             // Here you can add actual hardware control logic based on the command
              switch(cmd) {
                 case Command::LOCK:
@@ -157,8 +160,6 @@ public:
                     controlPin(TRUNK_PIN, 1.0);  // Activate for 1 second
                     break;
                 case Command::LOCATE:
-                    pCharacteristic_1->setValue("Locating..");
-                    pCharacteristic_1->notify();
                     blinkPin(LOCATE_PIN, 3.0);  // Blink for 3 seconds
                     break;
                 case Command::ELIGHT:
@@ -293,7 +294,7 @@ void setup() {
   pCharacteristic_2 = pService->createCharacteristic(
                       CHARACTERISTIC_UUID_2,
                       BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_WRITE  |                      
+                      BLECharacteristic::PROPERTY_WRITE  |
                       BLECharacteristic::PROPERTY_NOTIFY
                     );
   pCharacteristic_2->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED);
@@ -304,7 +305,7 @@ void setup() {
   pCharacteristic_1->addDescriptor(pDescr_1);
 
   pBLE2902_1 = new BLE2902();
-  pBLE2902_1->setNotifications(true);                 
+  pBLE2902_1->setNotifications(true);
   pCharacteristic_1->addDescriptor(pBLE2902_1);
 
   pBLE2902_2 = new BLE2902();
@@ -314,9 +315,9 @@ void setup() {
   // Set callbacks
   pCharacteristic_1->setCallbacks(new CharacteristicCallBack());
   pCharacteristic_2->setCallbacks(new CharacteristicCallBack());
-  
+
   // Start service
-  pService->start(); 
+  pService->start();
 
   // Configure advertising
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -324,6 +325,8 @@ void setup() {
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);
   pAdvertising->setMaxPreferred(0x12);
+  pAdvertising->setMinInterval(0x20); // Set minimum advertising interval
+  pAdvertising->setMaxInterval(0x40); // Set maximum advertising interval
 
   // Set security parameters
   esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
@@ -343,5 +346,13 @@ void loop() {
     }
     if (deviceConnected && !oldDeviceConnected) {
         oldDeviceConnected = deviceConnected;
+    }
+
+    // Check if no clients are connected for 2 minutes
+    if (!deviceConnected && millis() - lastDisconnectTime > 120000) {
+       // Serial.println("No clients connected for 2 minutes, entering light sleep...");
+        esp_sleep_enable_timer_wakeup(8000000); // Wake up after 8 second
+        delay(2000000);
+        esp_deep_sleep_start();
     }
 }
