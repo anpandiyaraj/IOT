@@ -174,11 +174,11 @@ public:
             Serial.println("Unknown command received");
         }
 
-        if (cmd != Command::ELIGHT && !response.isEmpty()) {
+
             pCharacteristic_1->setValue(response.c_str());
             pCharacteristic_1->notify();
             Serial.println("Response sent: " + response);
-        }
+     
     }
 
     void onRead(BLECharacteristic *pChar) override {
