@@ -26,6 +26,7 @@ enum class Command {
     UNLOCK,
     TRUNK,
     LOCATE,
+    ELIGHT,
     UNKNOWN
 };
 
@@ -33,7 +34,8 @@ const std::map<String, String> COMMAND_RESPONSES = {
     {"LOCK", "Door Locked"},
     {"UNLOCK", "Door Unlocked"},
     {"LOCATE", "Located"},
-    {"TRUNK", "Trunk Released"}
+    {"TRUNK", "Trunk Released"},
+    {"ELIGHT","Emergency Light"}
 };
 
 // UUIDs
@@ -48,6 +50,7 @@ const std::map<String, String> COMMAND_RESPONSES = {
 #define UNLOCK_PIN  26  // GPIO pin for Unlock
 #define TRUNK_PIN   27  // GPIO pin for Trunk
 #define LOCATE_PIN  14  // GPIO pin for Locate/Siren
+#define ELIGHT_PIN  13  // GPIO pin for Emergency Light
 
 // GAP callback to handle connection events
 void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
@@ -120,6 +123,7 @@ public:
         if (cmd == "UNLOCK") return Command::UNLOCK;
         if (cmd == "TRUNK") return Command::TRUNK;
         if (cmd == "LOCATE") return Command::LOCATE;
+        if (cmd == "ELIGHT") return Command::ELIGHT;
         return Command::UNKNOWN;
     }
 
@@ -157,6 +161,10 @@ public:
                     pCharacteristic_1->notify();
                     blinkPin(LOCATE_PIN, 3.0);  // Blink for 3 seconds
                     break;
+                case Command::ELIGHT:
+                    // Execute ELIGHT command without sending response
+                    controlPin(ELIGHT_PIN, 30);
+                    break;
                 default:
                     break;
             }
@@ -165,9 +173,11 @@ public:
             Serial.println("Unknown command received");
         }
 
-        pCharacteristic_1->setValue(response.c_str());
-        pCharacteristic_1->notify();
-        Serial.println("Response sent: " + response);
+        if (cmd != Command::ELIGHT && !response.isEmpty()) {
+            pCharacteristic_1->setValue(response.c_str());
+            pCharacteristic_1->notify();
+            Serial.println("Response sent: " + response);
+        }
     }
 
     void onRead(BLECharacteristic *pChar) override {
@@ -228,13 +238,14 @@ void setup() {
   pinMode(UNLOCK_PIN, OUTPUT);
   pinMode(TRUNK_PIN, OUTPUT);
   pinMode(LOCATE_PIN, OUTPUT);
+  pinMode(ELIGHT_PIN, OUTPUT);
 
   // Initialize all pins to LOW
   digitalWrite(LOCK_PIN, LOW);
   digitalWrite(UNLOCK_PIN, LOW);
   digitalWrite(TRUNK_PIN, LOW);
   digitalWrite(LOCATE_PIN, LOW);
-
+  digitalWrite(ELIGHT_PIN, LOW);
   // Debug print
   Serial.println("GPIO pins initialized");
 
