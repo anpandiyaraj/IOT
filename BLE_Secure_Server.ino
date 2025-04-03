@@ -16,28 +16,34 @@ BLEDescriptor *pDescr_1;
 BLE2902 *pBLE2902_1;
 BLE2902 *pBLE2902_2;
 
-// Connection state
+// Connection state and advertising control
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 bool isAuthenticated = false;
 uint16_t currentConnId = 0;
 unsigned long lastDisconnectTime = 0;
+bool advertisingActive = false;
+unsigned long lastActivityTime = 0;
+
+// Timeouts
+const unsigned long ADVERTISING_TIMEOUT = 60000; // 1 minute
+const unsigned long WAKEUP_INTERVAL = 8000000; // 8 seconds
 
 enum class Command {
-    LOCK,
-    UNLOCK,
-    TRUNK,
-    LOCATE,
-    ELIGHT,
-    UNKNOWN
+  LOCK,
+  UNLOCK,
+  TRUNK,
+  LOCATE,
+  ELIGHT,
+  UNKNOWN
 };
 
 const std::map<String, String> COMMAND_RESPONSES = {
-    {"LOCK", "Door Locked"},
-    {"UNLOCK", "Door Unlocked"},
-    {"LOCATE", "Located"},
-    {"TRUNK", "Trunk Released"},
-    {"ELIGHT","Emergency Light"}
+  {"LOCK", "Door Locked"},
+  {"UNLOCK", "Door Unlocked"},
+  {"LOCATE", "Located"},
+  {"TRUNK", "Trunk Released"},
+  {"ELIGHT", "Emergency Light"}
 };
 
 // UUIDs
@@ -48,146 +54,144 @@ const std::map<String, String> COMMAND_RESPONSES = {
 // Predefined passkey
 #define PASSKEY "123456"
 
-#define LOCK_PIN    25  // GPIO pin for Lock
-#define UNLOCK_PIN  26  // GPIO pin for Unlock
-#define TRUNK_PIN   27  // GPIO pin for Trunk
-#define LOCATE_PIN  14  // GPIO pin for Locate/Siren
-#define ELIGHT_PIN  13  // GPIO pin for Emergency Light
+#define LOCK_PIN      25  // GPIO pin for Lock
+#define UNLOCK_PIN    26  // GPIO pin for Unlock
+#define TRUNK_PIN     27  // GPIO pin for Trunk
+#define LOCATE_PIN    14  // GPIO pin for Locate/Siren
+#define ELIGHT_PIN    13  // GPIO pin for Emergency Light
 
 // GAP callback to handle connection events
 void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
-    switch(event) {
-        case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
-            char macStr[18];
-            sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
-                    param->update_conn_params.bda[0], param->update_conn_params.bda[1],
-                    param->update_conn_params.bda[2], param->update_conn_params.bda[3],
-                    param->update_conn_params.bda[4], param->update_conn_params.bda[5]);
-            Serial.print("Device connected: ");
-            Serial.println(macStr);
-            break;
+  switch (event) {
+    case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT: {
+        char macStr[18];
+        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                param->update_conn_params.bda[0], param->update_conn_params.bda[1],
+                param->update_conn_params.bda[2], param->update_conn_params.bda[3],
+                param->update_conn_params.bda[4], param->update_conn_params.bda[5]);
+        Serial.print("Device connected: ");
+        Serial.println(macStr);
+      }
+      break;
 
-        case ESP_GAP_BLE_AUTH_CMPL_EVT:
-            if(param->ble_security.auth_cmpl.success) {
-                Serial.println("Authentication successful");
-                isAuthenticated = true;
-            } else {
-                Serial.println("Authentication failed - disconnecting");
-                isAuthenticated = false;
-                if(pServer != nullptr && currentConnId > 0) {
-                    pServer->disconnect(currentConnId);
-                }
-            }
-            break;
-    }
+    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+      if (param->ble_security.auth_cmpl.success) {
+        Serial.println("Authentication successful");
+        isAuthenticated = true;
+      } else {
+        Serial.println("Authentication failed - disconnecting");
+        isAuthenticated = false;
+        if (pServer != nullptr && currentConnId > 0) {
+          pServer->disconnect(currentConnId);
+        }
+      }
+      break;
+  }
 }
 
-class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      deviceConnected = true;
-      currentConnId = pServer->getConnId();
-      isAuthenticated = false;
-      Serial.println("Client connected - waiting for authentication");
-    };
+class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    currentConnId = pServer->getConnId();
+    isAuthenticated = false;
+    Serial.println("Client connected - waiting for authentication");
+  };
 
-    void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
-      currentConnId = 0;
-      isAuthenticated = false;
-      lastDisconnectTime = millis();
-      Serial.println("Device disconnected");
-    }
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    currentConnId = 0;
+    isAuthenticated = false;
+    lastDisconnectTime = millis();
+    Serial.println("Device disconnected");
+  }
 };
 
-class CharacteristicCallBack: public BLECharacteristicCallbacks {
+class CharacteristicCallBack : public BLECharacteristicCallbacks {
 private:
-    void controlPin(uint8_t pin, float seconds) {
-        digitalWrite(pin, HIGH);
-        delay(seconds * 1000);  // Convert seconds to milliseconds
-        digitalWrite(pin, LOW);
-    }
+  void controlPin(uint8_t pin, float seconds) {
+    digitalWrite(pin, HIGH);
+    delay(seconds * 1000);  // Convert seconds to milliseconds
+    digitalWrite(pin, LOW);
+  }
 
-    void blinkPin(uint8_t pin, float seconds) {
-        unsigned long endTime = millis() + (seconds * 1000);
-        while (millis() < endTime) {
-            digitalWrite(pin, HIGH);
-            delay(100);
-            digitalWrite(pin, LOW);
-            delay(100);
-        }
+  void blinkPin(uint8_t pin, float seconds) {
+    unsigned long endTime = millis() + (seconds * 1000);
+    while (millis() < endTime) {
+      digitalWrite(pin, HIGH);
+      delay(100);
+      digitalWrite(pin, LOW);
+      delay(100);
     }
+  }
 
 public:
-    Command parseCommand(const String& command) {
-        String cmd = command;
-        cmd.toUpperCase();
+  Command parseCommand(const String& command) {
+    String cmd = command;
+    cmd.toUpperCase();
 
-        if (cmd == "LOCK") return Command::LOCK;
-        if (cmd == "UNLOCK") return Command::UNLOCK;
-        if (cmd == "TRUNK") return Command::TRUNK;
-        if (cmd == "LOCATE") return Command::LOCATE;
-        if (cmd == "ELIGHT") return Command::ELIGHT;
-        return Command::UNKNOWN;
+    if (cmd == "LOCK") return Command::LOCK;
+    if (cmd == "UNLOCK") return Command::UNLOCK;
+    if (cmd == "TRUNK") return Command::TRUNK;
+    if (cmd == "LOCATE") return Command::LOCATE;
+    if (cmd == "ELIGHT") return Command::ELIGHT;
+    return Command::UNKNOWN;
+  }
+
+  void onWrite(BLECharacteristic *pChar) override {
+    if (!isAuthenticated) {
+      Serial.println("Unauthorized access attempt - ignoring write");
+      return;
     }
 
-    void onWrite(BLECharacteristic *pChar) override {
-        if (!isAuthenticated) {
-            Serial.println("Unauthorized access attempt - ignoring write");
-            return;
-        }
+    String receivedValue = pChar->getValue().c_str();
+    Serial.println("Received command: " + receivedValue);
 
-        String receivedValue = pChar->getValue().c_str();
-        Serial.println("Received command: " + receivedValue);
+    Command cmd = parseCommand(receivedValue);
+    String response;
 
-        Command cmd = parseCommand(receivedValue);
-        String response;
+    // Look up response in map
+    auto it = COMMAND_RESPONSES.find(receivedValue);
+    if (it != COMMAND_RESPONSES.end()) {
+      response = it->second;
+      Serial.println("Executing command: " + receivedValue);
 
-        // Look up response in map
-        auto it = COMMAND_RESPONSES.find(receivedValue);
-        if (it != COMMAND_RESPONSES.end()) {
-            response = it->second;
-            Serial.println("Executing command: " + receivedValue);
-
-            // Here you can add actual hardware control logic based on the command
-             switch(cmd) {
-                case Command::LOCK:
-                    controlPin(LOCK_PIN, 0.5);  // Activate for 0.5 seconds
-                    break;
-                case Command::UNLOCK:
-                    controlPin(UNLOCK_PIN, 0.5);  // Activate for 0.5 seconds
-                    break;
-                case Command::TRUNK:
-                    controlPin(TRUNK_PIN, 1.0);  // Activate for 1 second
-                    break;
-                case Command::LOCATE:
-                    blinkPin(LOCATE_PIN, 3.0);  // Blink for 3 seconds
-                    break;
-                case Command::ELIGHT:
-                    // Execute ELIGHT command without sending response
-                    controlPin(ELIGHT_PIN, 30);
-                    break;
-                default:
-                    break;
-            }
-        } else {
-            response = "INVALID_COMMAND";
-            Serial.println("Unknown command received");
-        }
-
-
-            pCharacteristic_1->setValue(response.c_str());
-            pCharacteristic_1->notify();
-            Serial.println("Response sent: " + response);
-     
+      // Here you can add actual hardware control logic based on the command
+      switch (cmd) {
+        case Command::LOCK:
+          controlPin(LOCK_PIN, 0.5);  // Activate for 0.5 seconds
+          break;
+        case Command::UNLOCK:
+          controlPin(UNLOCK_PIN, 0.5);  // Activate for 0.5 seconds
+          break;
+        case Command::TRUNK:
+          controlPin(TRUNK_PIN, 1.0);  // Activate for 1 second
+          break;
+        case Command::LOCATE:
+          blinkPin(LOCATE_PIN, 3.0);  // Blink for 3 seconds
+          break;
+        case Command::ELIGHT:
+          controlPin(ELIGHT_PIN, 30);
+          break;
+        default:
+          break;
+      }
+    } else {
+      response = "INVALID_COMMAND";
+      Serial.println("Unknown command received");
     }
 
-    void onRead(BLECharacteristic *pChar) override {
-        if (!isAuthenticated) {
-            Serial.println("Unauthorized access attempt - blocking read");
-            pChar->setValue("");
-            return;
-        }
+    pCharacteristic_1->setValue(response.c_str());
+    pCharacteristic_1->notify();
+    Serial.println("Response sent: " + response);
+  }
+
+  void onRead(BLECharacteristic *pChar) override {
+    if (!isAuthenticated) {
+      Serial.println("Unauthorized access attempt - blocking read");
+      pChar->setValue("");
+      return;
     }
+  }
 };
 
 class MySecurityCallbacks : public BLESecurityCallbacks {
@@ -206,7 +210,7 @@ class MySecurityCallbacks : public BLESecurityCallbacks {
     if (!match) {
       Serial.println("Passkey mismatch - rejecting");
       isAuthenticated = false;
-      if(pServer != nullptr && currentConnId > 0) {
+      if (pServer != nullptr && currentConnId > 0) {
         pServer->disconnect(currentConnId);
       }
     }
@@ -220,7 +224,7 @@ class MySecurityCallbacks : public BLESecurityCallbacks {
     } else {
       Serial.println("Authentication failed - disconnecting");
       isAuthenticated = false;
-      if(pServer != nullptr && currentConnId > 0) {
+      if (pServer != nullptr && currentConnId > 0) {
         pServer->disconnect(currentConnId);
       }
     }
@@ -231,6 +235,23 @@ class MySecurityCallbacks : public BLESecurityCallbacks {
     return true;
   }
 };
+
+void startAdvertising() {
+  if (!advertisingActive) {
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->start();
+    advertisingActive = true;
+    Serial.println("Advertising started");
+  }
+}
+
+void stopAdvertising() {
+  if (advertisingActive) {
+    BLEDevice::getAdvertising()->stop();
+    advertisingActive = false;
+    Serial.println("Advertising stopped");
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -285,18 +306,18 @@ void setup() {
 
   // Create characteristics with security permissions
   pCharacteristic_1 = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID_1,
-                      BLECharacteristic::PROPERTY_NOTIFY |
-                      BLECharacteristic::PROPERTY_READ
-                    );
+    CHARACTERISTIC_UUID_1,
+    BLECharacteristic::PROPERTY_NOTIFY |
+    BLECharacteristic::PROPERTY_READ
+  );
   pCharacteristic_1->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED);
 
   pCharacteristic_2 = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID_2,
-                      BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_WRITE  |
-                      BLECharacteristic::PROPERTY_NOTIFY
-                    );
+    CHARACTERISTIC_UUID_2,
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_WRITE |
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
   pCharacteristic_2->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED);
 
   // Create descriptors
@@ -319,40 +340,34 @@ void setup() {
   // Start service
   pService->start();
 
-  // Configure advertising
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);
-  pAdvertising->setMaxPreferred(0x12);
-  pAdvertising->setMinInterval(0x20); // Set minimum advertising interval
-  pAdvertising->setMaxInterval(0x40); // Set maximum advertising interval
-
-  // Set security parameters
-  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
-
-  // Start advertising
-  BLEDevice::startAdvertising();
-  Serial.println("Waiting for a client connection with passkey authentication...");
+  // Start advertising initially
+  startAdvertising();
+  lastActivityTime = millis();
 }
 
 void loop() {
-    if (!deviceConnected && oldDeviceConnected) {
-        delay(500);
-        pServer->startAdvertising();
-        Serial.println("Start advertising");
-        oldDeviceConnected = deviceConnected;
-    }
-    if (deviceConnected && !oldDeviceConnected) {
-        oldDeviceConnected = deviceConnected;
-    }
+  if (deviceConnected) {
+    lastActivityTime = millis(); // Reset timeout on activity
+    stopAdvertising();
+  } else if (!deviceConnected && advertisingActive && millis() - lastActivityTime > ADVERTISING_TIMEOUT) {
+    stopAdvertising();
+  } else if (!deviceConnected && !advertisingActive && millis() - lastActivityTime <= ADVERTISING_TIMEOUT) {
+    startAdvertising();
+  }
 
-    // Check if no clients are connected for 2 minutes
-    if (!deviceConnected && millis() - lastDisconnectTime > 120000) {
-       // Serial.println("No clients connected for 2 minutes, entering light sleep...");
-        esp_sleep_enable_timer_wakeup(8000000); // Wake up after 8 second
-        delay(2000000);
-        esp_deep_sleep_start();
-    }
+  if (!deviceConnected && millis() - lastActivityTime > ADVERTISING_TIMEOUT + WAKEUP_INTERVAL) {
+    esp_sleep_enable_timer_wakeup(WAKEUP_INTERVAL);
+    Serial.println("Going to deep sleep");
+    Serial.flush();
+    esp_deep_sleep_start();
+  }
+
+  if (deviceConnected && !oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
+  }
+
+  if (!deviceConnected && oldDeviceConnected) {
+    delay(500);
+    oldDeviceConnected = deviceConnected;
+  }
 }
