@@ -28,6 +28,7 @@ unsigned long lastActivityTime = 0;
 // Timeouts
 const unsigned long ADVERTISING_TIMEOUT = 60000; // 1 minute
 const unsigned long WAKEUP_INTERVAL = 8000000; // 8 seconds
+const unsigned long WAKEUP_DELAY = 1000; // 1 second delay after wakeup
 
 enum class Command {
   LOCK,
@@ -239,6 +240,8 @@ class MySecurityCallbacks : public BLESecurityCallbacks {
 void startAdvertising() {
   if (!advertisingActive) {
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->setMinInterval(0x40); // Increased interval
+    pAdvertising->setMaxInterval(0x80); // Increased interval
     pAdvertising->start();
     advertisingActive = true;
     Serial.println("Advertising started");
@@ -274,7 +277,8 @@ void setup() {
   // Register the GAP callback
   esp_ble_gap_register_callback(gapCallback);
 
-  // Create the BLE Device
+    // Reset BLE on wakeup.
+  BLEDevice::deinit();
   BLEDevice::init("ESP32_Lock");
 
   // Set the security parameters and callbacks
@@ -343,31 +347,29 @@ void setup() {
   // Start advertising initially
   startAdvertising();
   lastActivityTime = millis();
+  delay(WAKEUP_DELAY); // keep device active for one second after wakeup.
 }
 
 void loop() {
   if (deviceConnected) {
     lastActivityTime = millis(); // Reset timeout on activity
     stopAdvertising();
-  } else if (!deviceConnected && advertisingActive && millis() - lastActivityTime > ADVERTISING_TIMEOUT) {
-    stopAdvertising();
-  } else if (!deviceConnected && !advertisingActive && millis() - lastActivityTime <= ADVERTISING_TIMEOUT) {
-    startAdvertising();
+  } else if (!deviceConnected) {
+      startAdvertising(); // start advertising when device is active and not connected.
   }
-
   if (!deviceConnected && millis() - lastActivityTime > ADVERTISING_TIMEOUT + WAKEUP_INTERVAL) {
     esp_sleep_enable_timer_wakeup(WAKEUP_INTERVAL);
     Serial.println("Going to deep sleep");
     Serial.flush();
     esp_deep_sleep_start();
   }
-
-  if (deviceConnected && !oldDeviceConnected) {
-    oldDeviceConnected = deviceConnected;
-  }
-
   if (!deviceConnected && oldDeviceConnected) {
     delay(500);
     oldDeviceConnected = deviceConnected;
   }
+  if (deviceConnected && !oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
+  }
+
+  delay(1); // small delay to prevent watchdog issues.
 }
