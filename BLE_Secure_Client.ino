@@ -11,7 +11,7 @@
 #define CHARACTERISTIC_UUID_2 "b12523bb-5e18-41fa-a498-cceb16bb7626" // Client command
 
 // Predefined passkey
-#define PASSKEY "151784"
+#define PASSKEY "12345"
 
 // === GPIO Pins for Commands ===
 #define LOCK_PIN    16
