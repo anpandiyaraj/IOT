@@ -6,9 +6,9 @@
 #include <string> // Include for std::string
 
 // === UUID Definitions ===
-#define SERVICE_UUID         "726f72c1-055d-4f94-b090-c1afeec24780"
-#define CHARACTERISTIC_UUID_1 "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b2" // Server response
-#define CHARACTERISTIC_UUID_2 "b12523bb-5e18-41fa-a498-cceb16bb7626" // Client command
+#define SERVICE_UUID         "a1c658ed-1df2-4c5c-8477-708f714f01f7"
+#define CHARACTERISTIC_UUID_1 "7dc6ca3d-f066-4bda-a742-4deb534b58d5" // Server response
+#define CHARACTERISTIC_UUID_2 "f16c9c3c-fbcc-4a8c-b130-0e79948b8f82" // Client command
 
 // Predefined passkey
 #define PASSKEY "12345"
