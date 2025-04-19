@@ -18,9 +18,9 @@ const String serverMAC = "5C:01:3B:9B:90:DD"; // Replace with your server's MAC
 const uint32_t blePasskey = 123456;
 
 // UUIDs for the service and characteristics
-#define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24780"
-#define CHARACTERISTIC_UUID_1    "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b2" // Server response
-#define CHARACTERISTIC_UUID_2    "b12523bb-5e18-41fa-a498-cceb16bb7626" // Client command
+#define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24782"
+#define CHARACTERISTIC_UUID_1    "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b4" // Server response
+#define CHARACTERISTIC_UUID_2    "b12523bb-5e18-41fa-a498-cceb16bb7628" // Client command
 
 // GPIO Pins for Commands (Wake-up Sources)
 #define LOCK_PIN               16
