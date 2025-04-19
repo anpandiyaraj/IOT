@@ -5,29 +5,30 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <BLESecurity.h>
-#include <map>
-#include <string>
+#include <esp_sleep.h>
+
+// UUIDs
+#define SERVICE_UUID         "726f72c1-055d-4f94-b090-c1afeec24782"
+#define CHARACTERISTIC_UUID_1 "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b"
+#define CHARACTERISTIC_UUID_2 "b12523bb-5e18-41fa-a498-cceb16bb7628"
 
 // Configurable variables
-String serverMAC = "5C:01:3B:9B:90:DD"; // Replace with your server's MAC
+String serverMAC = "5C:01:3B:DD:92:AA"; // Replace with your server's MAC
 uint32_t blePasskey = 123456;
+const int RSSI_THRESHOLD = -65; // Approx 30 feet
+const unsigned long SCAN_INTERVAL = 60000; // 1 minute
+const unsigned long INACTIVITY_TIMEOUT = 10000; // 10 seconds
+const unsigned long BOOT_CONNECTION_TIMEOUT = 5000; // 5 seconds to attempt connection on boot
 
-// UUIDs for the service and characteristics
-#define SERVICE_UUID         "726f72c1-055d-4f94-b090-c1afeec24781"
-#define CHARACTERISTIC_UUID_1 "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b2" // Server response
-#define CHARACTERISTIC_UUID_2 "b12523bb-5e18-41fa-a498-cceb16bb7623" // Client command
-
-// === GPIO Pins for Commands ===
-#define LOCK_PIN    16
-#define UNLOCK_PIN  17
-#define TRUNK_PIN   4
-#define LOCATE_PIN  2
-#define ELIGHT_PIN  15
-
-// === Configuration ===
+// === GPIO Pins for Commands (All RTC-capable) ===
+#define LOCK_PIN    13  // RTC IO
+#define UNLOCK_PIN  12  // RTC IO
+#define TRUNK_PIN   4   // RTC IO 
+#define LOCATE_PIN  2   // RTC IO
+#define ELIGHT_PIN  15  // RTC IO
 #define DEBOUNCE_DELAY_MS 50
 
-// === Map GPIO Pins to Commands ===
+// Command mapping
 enum class Command { LOCK, UNLOCK, TRUNK, LOCATE, ELIGHT, UNKNOWN };
 const std::map<int, Command> pinToCommandMap = {
     {LOCK_PIN, Command::LOCK},
@@ -45,79 +46,110 @@ const std::map<Command, String> commandMap = {
     {Command::ELIGHT, "ELIGHT"}
 };
 
+// BLE Objects
 BLEClient* pClient = nullptr;
 BLERemoteCharacteristic* pCharacteristic_1 = nullptr;
 BLERemoteCharacteristic* pCharacteristic_2 = nullptr;
-bool connected = false;
 
-// Notification callback
-void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
-    Serial.print("Notification received: ");
-    for (int i = 0; i < length; i++) {
-        Serial.print((char)pData[i]);
+// State variables
+bool connected = false;
+bool shouldUnlock = false;
+bool shouldLock = false;
+bool bootUnlockAttempted = false;
+unsigned long lastActivityTime = 0;
+unsigned long lastScanTime = 0;
+int lastRSSI = -100;
+bool wasInRange = false;
+
+// Configure all RTC-capable pins as wakeup sources
+void configureWakeupSources() {
+    uint64_t wakeupPinMask = 0;
+    for (const auto& pair : pinToCommandMap) {
+        wakeupPinMask |= (1ULL << pair.first);
     }
-    Serial.println();
+    esp_sleep_enable_ext1_wakeup(wakeupPinMask, ESP_EXT1_WAKEUP_ANY_HIGH);
+    Serial.printf("Configured wakeup pins mask: 0x%llX\n", wakeupPinMask);
 }
 
-// Security callbacks
-class ClientSecurityCallbacks : public BLESecurityCallbacks {
-    bool onSecurityRequest() {
-        Serial.println("Security request received.");
-        return true;
-    }
-
-    bool onConfirmPIN(uint32_t pass_key) {
-        Serial.print("Confirm passkey: ");
-        Serial.println(pass_key);
-        return true;
-    }
-
-    uint32_t onPassKeyRequest() {
-        Serial.println("Passkey requested.");
-        return blePasskey;
-    }
-
-    void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
-        if (cmpl.success) {
-            Serial.println("✅ Authentication success.");
-        } else {
-            Serial.println("❌ Authentication failed.");
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+        if (advertisedDevice.getAddress().toString() == serverMAC) {
+            lastRSSI = advertisedDevice.getRSSI();
+            Serial.print("Found server. RSSI: ");
+            Serial.println(lastRSSI);
+            
+            if (lastRSSI > RSSI_THRESHOLD && !wasInRange) {
+                shouldUnlock = true;
+                wasInRange = true;
+            } else if (lastRSSI <= RSSI_THRESHOLD && wasInRange) {
+                shouldLock = true;
+                wasInRange = false;
+            }
+            lastActivityTime = millis();
         }
     }
+};
 
-    void onPassKeyNotify(uint32_t pass_key) {
-        Serial.print("Passkey notify: ");
+void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, 
+                   uint8_t* pData, size_t length, bool isNotify) {
+    Serial.print("Notification: ");
+    Serial.write(pData, length);
+    Serial.println();
+    lastActivityTime = millis();
+}
+
+class ClientSecurityCallbacks : public BLESecurityCallbacks {
+    void onPassKeyNotify(uint32_t pass_key) override {
+        Serial.print("Passkey Notify: ");
         Serial.println(pass_key);
+    }
+    
+    bool onSecurityRequest() override {
+        Serial.println("Security Request");
+        return true;
+    }
+    
+    bool onConfirmPIN(uint32_t pin) override {
+        Serial.print("Confirm PIN: ");
+        Serial.println(pin);
+        return (pin == blePasskey);
+    }
+    
+    uint32_t onPassKeyRequest() override { 
+        Serial.println("PassKey Request");
+        return blePasskey; 
+    }
+    
+    void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
+        Serial.println(cmpl.success ? "✅ Authenticated" : "❌ Auth failed");
+        lastActivityTime = millis();
     }
 };
 
 bool connectToServer() {
-    Serial.print("Connecting to server at ");
-    Serial.println(serverMAC);
+    if (connected) return true;
+    
+    Serial.println("Connecting to server...");
+    lastActivityTime = millis();
+    
+    if (pClient == nullptr) {
+        pClient = BLEDevice::createClient();
+        BLEDevice::setSecurityCallbacks(new ClientSecurityCallbacks());
+        
+        BLESecurity* pSecurity = new BLESecurity();
+        pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+        pSecurity->setCapability(ESP_IO_CAP_OUT);
+    }
 
-    BLEAddress bleServerAddress(serverMAC.c_str());
-
-    pClient = BLEDevice::createClient();
-    Serial.println(" - Client created.");
-
-    BLESecurity* pSecurity = new BLESecurity();
-    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
-    pSecurity->setCapability(ESP_IO_CAP_OUT);  // Display-only (for passkey display)
-    BLEDevice::setSecurityCallbacks(new ClientSecurityCallbacks());
-
-    if (!pClient->connect(bleServerAddress)) {
-        Serial.println("❌ Failed to connect to server.");
-        connected = false;
+    BLEAddress serverAddress(serverMAC.c_str());
+    if (!pClient->connect(serverAddress)) {
+        Serial.println("❌ Connection failed");
         return false;
     }
 
-    Serial.println("✅ Connected to server.");
-
     BLERemoteService* pRemoteService = pClient->getService(SERVICE_UUID);
     if (pRemoteService == nullptr) {
-        Serial.println("❌ Failed to find service UUID.");
         pClient->disconnect();
-        connected = false;
         return false;
     }
 
@@ -126,72 +158,133 @@ bool connectToServer() {
 
     if (pCharacteristic_1 && pCharacteristic_1->canNotify()) {
         pCharacteristic_1->registerForNotify(notifyCallback);
-        Serial.println("🔔 Notification callback registered.");
-    }
-
-    if (pCharacteristic_2 && pCharacteristic_2->canWrite()) {
-        Serial.println("✉️ Ready to send commands.");
     }
 
     connected = true;
+    Serial.println("✅ Connected");
+    lastActivityTime = millis();
     return true;
 }
 
 void sendCommand(const String& command) {
-    if (connected && pCharacteristic_2 != nullptr) {
-        pCharacteristic_2->writeValue((uint8_t*)command.c_str(), command.length(), false);
-        Serial.print("📤 Sent command: ");
-        Serial.println(command);
-    } else {
-        Serial.println("⚠️ Cannot send command: not connected.");
-        if (pClient) {
-            pClient->disconnect();
-            connected = false;
-            Serial.println("🔌 Disconnected.");
-        }
+    if (!connectToServer()) {
+        Serial.println("⚠️ Cannot send command: connection failed");
+        return;
     }
+    
+    if (pCharacteristic_2 == nullptr) return;
+    
+    pCharacteristic_2->writeValue(command.c_str(), command.length());
+    Serial.print("Sent: ");
+    Serial.println(command);
+    lastActivityTime = millis();
+    
+    // Disconnect after sending command to save power
+    delay(100);
+    pClient->disconnect();
+    connected = false;
 }
 
-void setupPins() {
-    for (const auto& pinCommand : pinToCommandMap) {
-        pinMode(pinCommand.first, INPUT_PULLDOWN);
-    }
+void scanForServer() {
+    BLEScan* pScan = BLEDevice::getScan();
+    pScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+    pScan->setActiveScan(true);
+    pScan->start(5, false); // Scan for 5 seconds
+    lastActivityTime = millis();
 }
 
-Command getCommandFromInput() {
-    for (const auto& pinCommand : pinToCommandMap) {
-        if (digitalRead(pinCommand.first) == HIGH) {
-            delay(DEBOUNCE_DELAY_MS);
-            if (digitalRead(pinCommand.first) == HIGH) {
-                return pinCommand.second;
+Command checkButtonPress() {
+    for (const auto& pair : pinToCommandMap) {
+        if (digitalRead(pair.first) == HIGH) {
+            unsigned long currentTime = millis();
+            if (currentTime - lastActivityTime > DEBOUNCE_DELAY_MS) {
+                lastActivityTime = currentTime;
+                return pair.second;
             }
         }
     }
     return Command::UNKNOWN;
 }
 
+void enterDeepSleep() {
+    Serial.println("Entering deep sleep...");
+    delay(100); // Allow serial to flush
+    
+    // Configure wakeup sources before sleeping
+    configureWakeupSources();
+    
+    // Set all pins to low power state
+    for (const auto& pair : pinToCommandMap) {
+        digitalWrite(pair.first, LOW);
+        pinMode(pair.first, INPUT_PULLDOWN);
+    }
+    
+    esp_deep_sleep_start();
+}
+
+void attemptBootUnlock() {
+    if (bootUnlockAttempted) return;
+    
+    Serial.println("Attempting boot unlock...");
+    unsigned long startTime = millis();
+    
+    while (millis() - startTime < BOOT_CONNECTION_TIMEOUT) {
+        if (connectToServer()) {
+            sendCommand("UNLOCK");
+            break;
+        }
+        delay(500);
+    }
+    
+    bootUnlockAttempted = true;
+    lastActivityTime = millis();
+}
+
 void setup() {
     Serial.begin(115200);
-    Serial.println("🚀 Starting BLE Client with GPIO Control...");
-    BLEDevice::init("ESP32_BLE_Client");
-    setupPins();
-    if (!connected) {
-        connectToServer();
+    Serial.println("🚀 Starting BLE Client");
+    
+    // Initialize all command pins
+    for (const auto& pair : pinToCommandMap) {
+        pinMode(pair.first, INPUT_PULLDOWN);
     }
+    
+    BLEDevice::init("BLE_Client");
+    lastActivityTime = millis();
+    
+    // Attempt unlock on boot
+    attemptBootUnlock();
 }
 
 void loop() {
-    if (!connected) {
-        Serial.println("Attempting to reconnect...");
-        connectToServer();
-        delay(5000); // Retry every 5 seconds
-        return;
+    // Check for button presses
+    Command pressedCommand = checkButtonPress();
+    if (pressedCommand != Command::UNKNOWN) {
+        Serial.print("Button pressed: ");
+        Serial.println(commandMap.at(pressedCommand).c_str());
+        sendCommand(commandMap.at(pressedCommand));
     }
 
-    Command cmd = getCommandFromInput();
-    if (cmd != Command::UNKNOWN) {
-        Serial.println("Command detected: " + commandMap.at(cmd));
-        sendCommand(commandMap.at(cmd));
+    // Periodic scan and auto lock/unlock
+    if (millis() - lastScanTime > SCAN_INTERVAL) {
+        lastScanTime = millis();
+        scanForServer();
+        
+        if (shouldUnlock) {
+            sendCommand("UNLOCK");
+            shouldUnlock = false;
+        }
+        
+        if (shouldLock) {
+            sendCommand("LOCK");
+            shouldLock = false;
+        }
     }
-    delay(100); // Small delay
+
+    // Enter deep sleep if inactive for too long
+    if (millis() - lastActivityTime > INACTIVITY_TIMEOUT && !connected) {
+        enterDeepSleep();
+    }
+
+    delay(50);
 }
