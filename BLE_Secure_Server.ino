@@ -24,17 +24,20 @@ bool oldDeviceConnected = false;
 bool isAuthenticated = false;
 uint16_t currentConnId = 0;
 unsigned long lastActivityTime = 0;
+bool initialBoot = true;
+unsigned long bootTime = 0;
 
 // Configuration
-const unsigned long ADVERTISING_TIMEOUT = 60000; // 1 minute
-const unsigned long WAKEUP_INTERVAL = 8000000;   // 8 seconds
+const unsigned long WAKEUP_INTERVAL = 10000000;   // 10 seconds
 const unsigned long WAKEUP_DELAY = 1000;         // 1 second delay after wakeup
-const String PASSKEY = "151784";
+const unsigned long CONNECTION_TIMEOUT = 2000;   // 2 seconds to find connection
+const unsigned long INITIAL_BOOT_DELAY = 120000; // 2 minutes initial awake time
+const String PASSKEY = "12356";
 
 // UUIDs
-#define SERVICE_UUID         "726f72c1-055d-4f94-b090-c1afeec24781"
-#define CHARACTERISTIC_UUID_1 "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b3" // Server response
-#define CHARACTERISTIC_UUID_2 "b12523bb-5e18-41fa-a498-cceb16bb7624" // Client command
+#define SERVICE_UUID         "726f72c1-055d-4f94-b090-c1afeec24782"
+#define CHARACTERISTIC_UUID_1 "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b4" // Server response
+#define CHARACTERISTIC_UUID_2 "b12523bb-5e18-41fa-a498-cceb16bb7628" // Client command
 
 // Pin Definitions
 enum class Pin : uint8_t {
@@ -247,6 +250,8 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Initializing BLE Server");
 
+  bootTime = millis();
+
   // Initialize GPIO pins
   pinMode(static_cast<uint8_t>(Pin::LOCK), OUTPUT);
   pinMode(static_cast<uint8_t>(Pin::UNLOCK), OUTPUT);
@@ -334,24 +339,45 @@ void setup() {
 
 // ==================== Main Loop ====================
 void loop() {
-  if (deviceConnected) {
-    lastActivityTime = millis();
+  unsigned long currentTime = millis();
+  
+  // Handle initial boot period
+  if (initialBoot) {
+    if (currentTime - bootTime < INITIAL_BOOT_DELAY) {
+      // Still in initial boot period - stay awake regardless of connection
+      if (!deviceConnected && (currentTime - lastActivityTime > 10000)) {
+        // Restart advertising every 10 seconds during initial boot period
+        BLEDevice::startAdvertising();
+        Serial.println("Advertising during initial boot period");
+        lastActivityTime = currentTime;
+      }
+      delay(10);
+      return; // Skip normal sleep logic during initial boot
+    } else {
+      // Initial boot period ended
+      initialBoot = false;
+      lastActivityTime = currentTime; // Reset timer for normal operation
+      Serial.println("Initial boot period ended - entering normal operation");
+    }
   }
 
+  // Track connection state changes
   if (!deviceConnected && oldDeviceConnected) {
-    delay(500); // Give the bluetooth stack the chance to get things ready
+    delay(500); // Give the bluetooth stack time to cleanup
     oldDeviceConnected = deviceConnected;
     BLEDevice::startAdvertising();
     Serial.println("Advertising restarted");
+    lastActivityTime = currentTime; // Reset timer when starting advertising
   }
 
   if (deviceConnected && !oldDeviceConnected) {
     oldDeviceConnected = deviceConnected;
+    lastActivityTime = currentTime; // Reset timer when device connects
   }
 
-  // Enter deep sleep if inactive for too long
-  if (!deviceConnected && (millis() - lastActivityTime > ADVERTISING_TIMEOUT + WAKEUP_INTERVAL)) {
-    Serial.println("Entering deep sleep");
+  // Normal operation sleep logic (after initial boot period)
+  if (!initialBoot && !deviceConnected && (currentTime - lastActivityTime > CONNECTION_TIMEOUT)) {
+    Serial.println("No connection established - entering deep sleep");
     esp_sleep_enable_timer_wakeup(WAKEUP_INTERVAL);
     esp_deep_sleep_start();
   }
