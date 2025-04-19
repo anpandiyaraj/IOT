@@ -14,8 +14,8 @@
 #include <algorithm>
 
 // ===== Configuration =====
-const String serverMAC = "5C:01:3B:95:90:AA"; // Replace with your server's MAC
-const uint32_t blePasskey = 151784;
+const String serverMAC = "5C:01:3B:9B:90:DD"; // Replace with your server's MAC
+const uint32_t blePasskey = 123456;
 
 // UUIDs for the service and characteristics
 #define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24780"
