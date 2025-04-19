@@ -13,7 +13,7 @@
 #define CHARACTERISTIC_UUID_2 "b12523bb-5e18-41fa-a498-cceb16bb7628"
 
 // Configurable variables
-String serverMAC = "5C:01:3B:DD:92:AA"; // Replace with your server's MAC
+String serverMAC = "5C:01:3B:DD:9B:AA"; // Replace with your server's MAC
 uint32_t blePasskey = 123456;
 const int RSSI_THRESHOLD = -65; // Approx 30 feet
 const unsigned long SCAN_INTERVAL = 60000; // 1 minute
