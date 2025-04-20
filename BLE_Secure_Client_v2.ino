@@ -13,8 +13,8 @@
 #include <algorithm>
 
 // ===== Configuration =====
-const String serverMAC = "5C:01:3B:95:90:AA"; // Replace with your server's MAC
-const uint32_t blePasskey = 151784; // Matching your Java app's PASSKEY
+const String serverMAC = "5C:01:3B:9D:90:BB"; // Replace with your server's MAC
+const uint32_t blePasskey = 123456; // Matching your Java app's PASSKEY
 
 // UUIDs for the service and characteristics
 #define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24780"
