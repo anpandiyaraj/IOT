@@ -10,40 +10,38 @@
 #include <map>
 #include <string>
 #include <vector>
-#include <numeric>
 #include <algorithm>
 
 // ===== Configuration =====
-const String serverMAC = "5C:01:3B:9B:90:DD"; // Replace with your server's MAC
-const uint32_t blePasskey = 123456;
+const String serverMAC = "5C:01:3B:95:90:AA"; // Replace with your server's MAC
+const uint32_t blePasskey = 151784; // Matching your Java app's PASSKEY
 
 // UUIDs for the service and characteristics
-#define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24782"
-#define CHARACTERISTIC_UUID_1    "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b4" // Server response
-#define CHARACTERISTIC_UUID_2    "b12523bb-5e18-41fa-a498-cceb16bb7628" // Client command
+#define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24780"
+#define CHARACTERISTIC_UUID_RX   "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b2" // Notification characteristic
+#define CHARACTERISTIC_UUID_TX   "b12523bb-5e18-41fa-a498-cceb16bb7626" // Write characteristic
 
-// GPIO Pins for Commands (Wake-up Sources)
+// GPIO Pins for Commands
 #define LOCK_PIN               16
 #define UNLOCK_PIN             17
 #define TRUNK_PIN              4
 #define LOCATE_PIN             2
-#define ELIGHT_PIN             15
-#define RESET_PIN              13  // Added for manual reset functionality
+#define RESET_PIN              13
 
-// Timing and thresholds
+// Timing and thresholds (matching Java app)
+#define RSSI_THRESHOLD         -93      // Same as Java app's LOCK_THRESHOLD
+#define RSSI_HISTORY_SIZE      5        // Same as Java app's RSSI_HISTORY_SIZE
+#define RSSI_UPDATE_INTERVAL   1000     // Same as Java app's RSSI_UPDATE_INTERVAL
+#define RSSI_CONFIRMATION_DELAY 2000    // Same as Java app's RSSI_CONFIRMATION_DELAY
 #define DEBOUNCE_DELAY_MS      50
-#define RSSI_THRESHOLD_UNLOCK  -85  // Unlock when RSSI is better than -85
-#define RSSI_THRESHOLD_LOCK    -86  // Lock when RSSI is worse than -86
-#define RSSI_AVERAGE_WINDOW    5
 #define CONNECTION_TIMEOUT_MS  10000
 #define CONNECTION_RETRY_DELAY_MS 5000
 #define MAX_RAPID_RETRIES      3
-#define LONG_SLEEP_DURATION_S  60  // Sleep for 1 minute after max retries
-#define WATCHDOG_TIMEOUT_MS    30000  // Watchdog timeout in milliseconds (30s)
-#define RSSI_UPDATE_INTERVAL   2000 // Check RSSI every 2 seconds
+#define LONG_SLEEP_DURATION_S  60
+#define WATCHDOG_TIMEOUT_MS    30000
 
 // Command enumeration
-enum class Command { LOCK, UNLOCK, TRUNK, LOCATE, ELIGHT, RESET, UNKNOWN };
+enum class Command { LOCK, UNLOCK, TRUNK, LOCATE, RESET, UNKNOWN };
 
 // Lock status enumeration
 enum class LockStatus { NONE, LOCKED, UNLOCKED };
@@ -54,8 +52,7 @@ const std::map<int, Command> pinToCommandMap = {
     {UNLOCK_PIN, Command::UNLOCK},
     {TRUNK_PIN,  Command::TRUNK},
     {LOCATE_PIN, Command::LOCATE},
-    {ELIGHT_PIN, Command::ELIGHT},
-    {RESET_PIN,  Command::RESET}  // Added reset command
+    {RESET_PIN,  Command::RESET}
 };
 
 // Command to string mapping
@@ -64,33 +61,32 @@ const std::map<Command, String> commandMap = {
     {Command::UNLOCK, "UNLOCK"},
     {Command::TRUNK,  "TRUNK"},
     {Command::LOCATE, "LOCATE"},
-    {Command::ELIGHT, "ELIGHT"},
     {Command::RESET,  "RESET"}
 };
 
 // Global variables
 BLEClient* pClient = nullptr;
-BLERemoteCharacteristic* pCharacteristic_1 = nullptr;
-BLERemoteCharacteristic* pCharacteristic_2 = nullptr;
+BLERemoteCharacteristic* pNotifyCharacteristic = nullptr;
+BLERemoteCharacteristic* pWriteCharacteristic = nullptr;
 bool connected = false;
-std::vector<int> rssiBuffer;
+std::vector<int> rssiHistory;
 LockStatus lockStatus = LockStatus::NONE;
 int connectionRetries = 0;
 unsigned long lastRssiCheckTime = 0;
+unsigned long lastRssiTriggerTime = 0;
+bool isManualLock = false;
 
 // ===== Watchdog Functions =====
 void initWatchdog() {
-    // Initialize Task Watchdog Timer (TWDT)
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = WATCHDOG_TIMEOUT_MS,
-        .idle_core_mask = (1 << 0) // Monitor Core 0 (where Arduino runs)
+        .idle_core_mask = (1 << 0)
     };
     
     if (esp_task_wdt_init(&twdt_config) != ESP_OK) {
         Serial.println("Failed to initialize watchdog");
     }
     
-    // Subscribe this task to TWDT
     if (esp_task_wdt_add(NULL) != ESP_OK) {
         Serial.println("Failed to add task to watchdog");
     }
@@ -107,58 +103,88 @@ void feedWatchdog() {
 // ===== RSSI Functions =====
 void addRSSI(int rssi) {
     if (rssi >= -100 && rssi <= 0) {
-        rssiBuffer.push_back(rssi);
-        if (rssiBuffer.size() > RSSI_AVERAGE_WINDOW) {
-            rssiBuffer.erase(rssiBuffer.begin());
+        rssiHistory.push_back(rssi);
+        if (rssiHistory.size() > RSSI_HISTORY_SIZE) {
+            rssiHistory.erase(rssiHistory.begin());
         }
     }
 }
 
-int getAverageRSSI() {
-    if (rssiBuffer.empty()) return -127;
-    int sum = std::accumulate(rssiBuffer.begin(), rssiBuffer.end(), 0);
-    return sum / rssiBuffer.size();
+int getMedianRSSI() {
+    if (rssiHistory.empty()) return -127;
+    
+    std::vector<int> sortedHistory = rssiHistory;
+    std::sort(sortedHistory.begin(), sortedHistory.end());
+    
+    return sortedHistory[sortedHistory.size() / 2];
 }
 
 // ===== Auto Lock/Unlock Functions =====
+bool shouldAutoUnlock(int rssi) {
+    if (isManualLock) return false;
+    return (rssi > RSSI_THRESHOLD);
+}
+
+bool shouldAutoLock(int rssi) {
+    return (rssi < RSSI_THRESHOLD && lockStatus == LockStatus::UNLOCKED);
+}
+
+void handleDistanceChange(int rssi) {
+    unsigned long currentTime = millis();
+    if (currentTime - lastRssiTriggerTime < RSSI_CONFIRMATION_DELAY) {
+        return;
+    }
+
+    if (shouldAutoUnlock(rssi) && 
+        (lockStatus == LockStatus::NONE || lockStatus == LockStatus::LOCKED)) {
+        Serial.println("Auto UNLOCK triggered by proximity");
+        sendCommand(commandMap.at(Command::UNLOCK));
+        lockStatus = LockStatus::UNLOCKED;
+        lastRssiTriggerTime = currentTime;
+    }
+    else if (shouldAutoLock(rssi)) {
+        Serial.println("Auto LOCK triggered by distance");
+        sendCommand(commandMap.at(Command::LOCK));
+        lockStatus = LockStatus::LOCKED;
+        lastRssiTriggerTime = currentTime;
+    }
+}
+
 void checkAutoLockUnlock() {
     if (!connected || !pClient->isConnected()) {
         return;
     }
 
-    int currentRSSI = getAverageRSSI();
-    Serial.print("Checking auto lock/unlock. RSSI: ");
+    int currentRSSI = getMedianRSSI();
+    Serial.print("RSSI: ");
     Serial.print(currentRSSI);
-    Serial.print(", Lock status: ");
+    Serial.print(", Status: ");
     switch(lockStatus) {
         case LockStatus::NONE: Serial.println("NONE"); break;
         case LockStatus::LOCKED: Serial.println("LOCKED"); break;
         case LockStatus::UNLOCKED: Serial.println("UNLOCKED"); break;
     }
 
-    // Auto-unlock logic (when RSSI is strong and car is locked or status unknown)
-    if (currentRSSI > RSSI_THRESHOLD_UNLOCK && 
-        (lockStatus == LockStatus::NONE || lockStatus == LockStatus::LOCKED)) {
-        Serial.println("Auto UNLOCK triggered");
-        sendCommand(commandMap.at(Command::UNLOCK));
-        lockStatus = LockStatus::UNLOCKED;
-    }
-    // Auto-lock logic (when RSSI is weak and car is unlocked)
-    else if (currentRSSI < RSSI_THRESHOLD_LOCK && lockStatus == LockStatus::UNLOCKED) {
-        Serial.println("Auto LOCK triggered");
-        sendCommand(commandMap.at(Command::LOCK));
-        lockStatus = LockStatus::LOCKED;
-    }
+    handleDistanceChange(currentRSSI);
 }
 
 // ===== BLE Functions =====
 void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, 
                    uint8_t* pData, size_t length, bool isNotify) {
-    Serial.print("Notification received: ");
+    Serial.print("Notification: ");
     for (int i = 0; i < length; i++) {
         Serial.print((char)pData[i]);
     }
     Serial.println();
+    
+    // Update lock status based on server response
+    String response((char*)pData);
+    if (response.indexOf("Unlocked") != -1) {
+        lockStatus = LockStatus::UNLOCKED;
+        isManualLock = false;
+    } else if (response.indexOf("Locked") != -1) {
+        lockStatus = LockStatus::LOCKED;
+    }
 }
 
 class ClientSecurityCallbacks : public BLESecurityCallbacks {
@@ -170,7 +196,7 @@ class ClientSecurityCallbacks : public BLESecurityCallbacks {
     bool onConfirmPIN(uint32_t pass_key) {
         Serial.print("Confirm passkey: ");
         Serial.println(pass_key);
-        return true;
+        return (pass_key == blePasskey);
     }
 
     uint32_t onPassKeyRequest() {
@@ -178,13 +204,20 @@ class ClientSecurityCallbacks : public BLESecurityCallbacks {
         return blePasskey;
     }
 
+    void onPassKeyNotify(uint32_t pass_key) {
+        Serial.print("Passkey Notify: ");
+        Serial.println(pass_key);
+        // You might want to handle this notification in a specific way
+        // or simply acknowledge it.
+    }
+
     void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
         if (cmpl.success) {
             Serial.println("✅ Authentication success");
             feedWatchdog();
-            
-            // After authentication, check if we should auto-unlock
-            if (connected && getAverageRSSI() > RSSI_THRESHOLD_UNLOCK && 
+
+            // Check if we should auto-unlock after authentication
+            if (connected && shouldAutoUnlock(getMedianRSSI()) &&
                 (lockStatus == LockStatus::NONE || lockStatus == LockStatus::LOCKED)) {
                 Serial.println("Auto UNLOCK after authentication");
                 sendCommand(commandMap.at(Command::UNLOCK));
@@ -194,13 +227,7 @@ class ClientSecurityCallbacks : public BLESecurityCallbacks {
             Serial.println("❌ Authentication failed");
         }
     }
-
-    void onPassKeyNotify(uint32_t pass_key) {
-        Serial.print("Passkey notify: ");
-        Serial.println(pass_key);
-    }
 };
-
 class MyClientCallback : public BLEClientCallbacks {
     void onConnect(BLEClient* pclient) {
         connected = true;
@@ -211,12 +238,12 @@ class MyClientCallback : public BLEClientCallbacks {
 
     void onDisconnect(BLEClient* pclient) {
         connected = false;
-        lockStatus = LockStatus::NONE; // Reset status on disconnect
+        lockStatus = LockStatus::NONE;
         Serial.println("🔌 Disconnected from server");
 
         // Clean up BLE resources
-        if (pCharacteristic_1) pCharacteristic_1 = nullptr;
-        if (pCharacteristic_2) pCharacteristic_2 = nullptr;
+        if (pNotifyCharacteristic) pNotifyCharacteristic = nullptr;
+        if (pWriteCharacteristic) pWriteCharacteristic = nullptr;
         if (pClient) {
             pClient->disconnect();
             delete pClient;
@@ -225,13 +252,13 @@ class MyClientCallback : public BLEClientCallbacks {
 
         // Prepare for reconnection
         if (connectionRetries < MAX_RAPID_RETRIES) {
-            Serial.printf("Will retry in %dms (attempt %d/%d)\n", 
+            Serial.printf("Retrying in %dms (attempt %d/%d)\n", 
                          CONNECTION_RETRY_DELAY_MS, 
                          connectionRetries + 1, 
                          MAX_RAPID_RETRIES);
             esp_sleep_enable_timer_wakeup(CONNECTION_RETRY_DELAY_MS * 1000);
         } else {
-            Serial.printf("Max retries reached, sleeping for %d seconds\n", LONG_SLEEP_DURATION_S);
+            Serial.printf("Max retries, sleeping for %d seconds\n", LONG_SLEEP_DURATION_S);
             esp_sleep_enable_timer_wakeup(LONG_SLEEP_DURATION_S * 1000000);
         }
         esp_deep_sleep_start();
@@ -239,7 +266,7 @@ class MyClientCallback : public BLEClientCallbacks {
 };
 
 bool connectToServer() {
-    Serial.print("Connecting to server at ");
+    Serial.print("Connecting to ");
     Serial.println(serverMAC);
     feedWatchdog();
 
@@ -261,11 +288,10 @@ bool connectToServer() {
     pSecurity->setCapability(ESP_IO_CAP_OUT);
     BLEDevice::setSecurityCallbacks(new ClientSecurityCallbacks());
 
-    // Attempt connection with manual timeout
+    // Attempt connection with timeout
     unsigned long connectStart = millis();
     bool connectionSuccess = pClient->connect(bleServerAddress);
     
-    // Manual timeout check
     while (!connectionSuccess && (millis() - connectStart < CONNECTION_TIMEOUT_MS)) {
         delay(100);
         feedWatchdog();
@@ -273,7 +299,7 @@ bool connectToServer() {
     }
 
     if (!connectionSuccess) {
-        Serial.println("❌ Failed to connect to server");
+        Serial.println("❌ Failed to connect");
         connected = false;
         connectionRetries++;
         return false;
@@ -293,24 +319,20 @@ bool connectToServer() {
     }
 
     // Get characteristics
-    pCharacteristic_1 = pRemoteService->getCharacteristic(CHARACTERISTIC_UUID_1);
-    pCharacteristic_2 = pRemoteService->getCharacteristic(CHARACTERISTIC_UUID_2);
+    pNotifyCharacteristic = pRemoteService->getCharacteristic(CHARACTERISTIC_UUID_RX);
+    pWriteCharacteristic = pRemoteService->getCharacteristic(CHARACTERISTIC_UUID_TX);
 
-    if (!pCharacteristic_1 || !pCharacteristic_2) {
+    if (!pNotifyCharacteristic || !pWriteCharacteristic) {
         Serial.println("❌ Failed to find characteristics");
         pClient->disconnect();
         connected = false;
         return false;
     }
 
-    // Register for notifications if available
-    if (pCharacteristic_1->canNotify()) {
-        pCharacteristic_1->registerForNotify(notifyCallback);
+    // Register for notifications
+    if (pNotifyCharacteristic->canNotify()) {
+        pNotifyCharacteristic->registerForNotify(notifyCallback);
         Serial.println("🔔 Notification callback registered");
-    }
-
-    if (pCharacteristic_2->canWrite()) {
-        Serial.println("✉️ Ready to send commands");
     }
 
     // Get initial RSSI
@@ -319,7 +341,7 @@ bool connectToServer() {
         int rawRSSI = pClient->getRssi();
         addRSSI(rawRSSI);
         Serial.print("Initial RSSI: ");
-        Serial.println(getAverageRSSI());
+        Serial.println(getMedianRSSI());
         
         // Check if we should auto-unlock on initial connection
         checkAutoLockUnlock();
@@ -330,20 +352,22 @@ bool connectToServer() {
 
 // ===== Command Functions =====
 void sendCommand(const String& command) {
-    if (!connected || !pCharacteristic_2) {
-        Serial.println("⚠️ Cannot send command: not connected");
+    if (!connected || !pWriteCharacteristic) {
+        Serial.println("⚠️ Not connected, can't send command");
         return;
     }
 
-    pCharacteristic_2->writeValue((uint8_t*)command.c_str(), command.length(), false);
-    Serial.print("📤 Sent command: ");
+    pWriteCharacteristic->writeValue((uint8_t*)command.c_str(), command.length(), false);
+    Serial.print("📤 Sent: ");
     Serial.println(command);
     
-    // Update lock state
+    // Update lock state and manual lock flag
     if (command == commandMap.at(Command::LOCK)) {
         lockStatus = LockStatus::LOCKED;
+        isManualLock = true;
     } else if (command == commandMap.at(Command::UNLOCK)) {
         lockStatus = LockStatus::UNLOCKED;
+        isManualLock = false;
     }
     feedWatchdog();
 }
@@ -369,7 +393,7 @@ void setupPinsForWakeup() {
 }
 
 void goToDeepSleep(uint32_t seconds) {
-    Serial.printf("Going to deep sleep for %d seconds...\n", seconds);
+    Serial.printf("Sleeping for %d seconds...\n", seconds);
     esp_sleep_enable_timer_wakeup(seconds * 1000000);
     esp_deep_sleep_start();
 }
@@ -377,7 +401,7 @@ void goToDeepSleep(uint32_t seconds) {
 // ===== Main Functions =====
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n🚀 Smart Car Key - Enhanced Version");
+    Serial.println("\n🚗 ESP32 Smart Car Key");
     
     // Initialize watchdog
     initWatchdog();
@@ -391,19 +415,17 @@ void setup() {
     esp_sleep_wakeup_cause_t wakeUpSource = esp_sleep_get_wakeup_cause();
     
     if (wakeUpSource == ESP_SLEEP_WAKEUP_TIMER) {
-        Serial.println("Woke up by timer - attempting to reconnect");
+        Serial.println("Woke by timer - reconnecting");
         feedWatchdog();
         if (!connectToServer()) {
             if (connectionRetries >= MAX_RAPID_RETRIES) {
-                Serial.println("Max retries reached, going to long sleep");
                 goToDeepSleep(LONG_SLEEP_DURATION_S);
             } else {
-                Serial.println("Reconnection failed, going back to sleep");
                 goToDeepSleep(CONNECTION_RETRY_DELAY_MS / 1000);
             }
         }
     } else {
-        Serial.print("Woke up by: ");
+        Serial.print("Wakeup cause: ");
         if (wakeUpSource == ESP_SLEEP_WAKEUP_EXT0) {
             Serial.println("GPIO (button press)");
         } else {
@@ -412,7 +434,6 @@ void setup() {
         
         feedWatchdog();
         if (!connectToServer()) {
-            Serial.println("Initial connection failed, going to sleep for retry");
             goToDeepSleep(CONNECTION_RETRY_DELAY_MS / 1000);
         }
     }
@@ -425,10 +446,10 @@ void loop() {
         // Handle button presses
         Command cmd = getCommandFromInput();
         if (cmd != Command::UNKNOWN) {
-            Serial.println("Command detected: " + commandMap.at(cmd));
+            Serial.println("Command: " + commandMap.at(cmd));
             
             if (cmd == Command::RESET) {
-                Serial.println("Manual reset triggered");
+                Serial.println("Resetting...");
                 esp_restart();
             } else {
                 sendCommand(commandMap.at(cmd));
@@ -436,26 +457,25 @@ void loop() {
             delay(500);
         }
 
-        // Periodically check RSSI and auto lock/unlock
+        // Periodic RSSI check
         if (millis() - lastRssiCheckTime > RSSI_UPDATE_INTERVAL) {
             lastRssiCheckTime = millis();
             if (pClient && pClient->isConnected()) {
                 int rawRSSI = pClient->getRssi();
                 addRSSI(rawRSSI);
-                Serial.print("Current RSSI: ");
+                Serial.print("RSSI: ");
                 Serial.print(rawRSSI);
-                Serial.print(" (avg: ");
-                Serial.print(getAverageRSSI());
+                Serial.print(" (median: ");
+                Serial.print(getMedianRSSI());
                 Serial.println(")");
                 
-                // Check if we should auto lock/unlock
                 checkAutoLockUnlock();
             }
         }
 
         delay(100);
     } else {
-        Serial.println("Unexpected disconnected state, resetting");
+        Serial.println("Disconnected, resetting...");
         esp_restart();
     }
 }
