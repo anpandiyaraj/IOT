@@ -17,9 +17,9 @@ const String serverMAC = "5C:01:3B:9D:90:BB"; // Replace with your server's MAC
 const uint32_t blePasskey = 123456; // Matching your Java app's PASSKEY
 
 // UUIDs for the service and characteristics
-#define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24780"
-#define CHARACTERISTIC_UUID_RX   "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b2" // Notification characteristic
-#define CHARACTERISTIC_UUID_TX   "b12523bb-5e18-41fa-a498-cceb16bb7626" // Write characteristic
+#define SERVICE_UUID             "726f72c1-055d-4f94-b090-c1afeec24782"
+#define CHARACTERISTIC_UUID_RX   "c1cf0c5d-d07f-4f7c-ad2e-9cb3e49286b4" // Notification characteristic
+#define CHARACTERISTIC_UUID_TX   "b12523bb-5e18-41fa-a498-cceb16bb7628" // Write characteristic
 
 // GPIO Pins for Commands
 #define LOCK_PIN               16
