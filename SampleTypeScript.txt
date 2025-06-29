@@ -1,0 +1,29 @@
+function doGet(e) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var uid = e.parameter.uid;
+  var timestamp = new Date();
+
+  if (!uid) {
+    return ContentService.createTextOutput("Missing UID");
+  }
+
+  // Get all data in the sheet
+  var data = sheet.getDataRange().getValues();
+  var lastAction = "";
+
+  // Search from bottom up for the last action of this UID
+  for (var i = data.length - 1; i >= 1; i--) {
+    if (data[i][0] == uid) {
+      lastAction = data[i][1];
+      break;
+    }
+  }
+
+  // Determine new action
+  var newAction = (lastAction === "login") ? "logout" : "login";
+
+  // Append new row
+  sheet.appendRow([uid, newAction, timestamp]);
+
+  return ContentService.createTextOutput("Recorded: " + newAction);
+}
